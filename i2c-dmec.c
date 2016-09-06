@@ -77,7 +77,9 @@ struct dmec_i2c {
 	u32 reg_io_width;
 	wait_queue_head_t wait;
 	struct i2c_adapter adap;
+	struct i2c_adapter *dmx_adap[DMEC_I2C_MAX_BUS_NUM];
 	struct i2c_mux_core *mux;
+	int dmx_adap_num;
 	struct i2c_msg *msg;
 	int pos;
 	int nmsgs;
@@ -111,9 +113,9 @@ static inline u8 dmec_i2c_getreg(struct dmec_i2c *i2c, int reg)
 	return val;
 }
 
-static int dmec_i2c_dmx_select(struct i2c_mux_core *mux, u32 chan)
+static int dmec_i2c_dmx_select(struct i2c_adapter *adap, void *data, u32 chan)
 {
-	struct dmec_i2c *i2c = mux->priv;
+	struct dmec_i2c *i2c = data;
 	u8 bus = chan & 0x3;
 
 	dmec_i2c_setreg(i2c, DMECI2C_MUX, bus);
@@ -123,8 +125,14 @@ static int dmec_i2c_dmx_select(struct i2c_mux_core *mux, u32 chan)
 
 static void dmec_i2c_dmx_del(struct dmec_i2c *i2c)
 {
-	if (i2c->mux)
-		i2c_mux_del_adapters(i2c->mux);
+	int adap_num = i2c->dmx_adap_num;
+
+	while (adap_num-- > 0) {
+		if (i2c->dmx_adap[adap_num]) {
+			i2c_del_mux_adapter(i2c->dmx_adap[adap_num]);
+			i2c->dmx_adap[adap_num] = NULL;
+		}
+	}
 }
 
 static int dmec_i2c_dmx_add(struct dmec_i2c *i2c)
@@ -135,27 +143,21 @@ static int dmec_i2c_dmx_add(struct dmec_i2c *i2c)
 	bus_mask = dmec_i2c_getreg(i2c, DMECI2C_MUX);
 	bus_mask = (bus_mask & 0x70) >> 4;
 
-	i2c->mux = i2c_mux_alloc(&i2c->adap,
-				 i2c->dev,
-				 DMEC_I2C_MAX_BUS_NUM, 0, 0,
-				 dmec_i2c_dmx_select,
-				 NULL);
-	if (!i2c->mux)
-		return -ENOMEM;
-
-	i2c->mux->priv = i2c;
-
 	for (i = 0; i < DMEC_I2C_MAX_BUS_NUM; i++) {
 		if (!(bus_mask & (i + 1)))
 			/* bus is not present so skip */
 			continue;
-		ret = i2c_mux_add_adapter(i2c->mux, 0, i, 0);
-		if (ret) {
+		i2c->dmx_adap[i] = i2c_add_mux_adapter(&i2c->adap, i2c->dev,
+						       i2c, 0, i, 0,
+						       dmec_i2c_dmx_select,
+						       NULL);
+		if (!i2c->dmx_adap[i]) {
 			ret = -ENODEV;
 			dev_err(i2c->dev,
 				"i2c dmx failed to register adapter %d\n", i);
 			goto dmec_i2c_dmx_add_failed;
 		}
+		i2c->dmx_adap_num++;
 	}
 
 	return 0;
