@@ -286,7 +286,6 @@ static int dmec_wdt_set_timeout(struct watchdog_device *wdd,
 	dmec_wdt_clear_action(wdat, S2);
 	dmec_wdt_set_stage_timeout(wdat, S2, timeout);
 	dmec_wdt_set_stage_action(wdat, S2, WDT_RESET);
-	clear_bit(WDOG_HW_RUNNING, &wdd->status);
 	dmec_wdt_start(wdd);
 
 	return 0;
@@ -400,16 +399,11 @@ static int dmec_wdt_config_win_mode(struct dmec_wdt_data *wdat)
 
 static int dmec_wdt_config_mode(struct dmec_wdt_data *wdat)
 {
-	struct watchdog_device *wdd = &wdat->wdd;
-
 	if (!(wdat->boot_cfg & DMEC_WDT_EN))
 		return -1;
 
 	if (dmec_wdt_get_hw_ping_time(wdat) < 0)
 		return -1;
-
-	wdd->max_hw_heartbeat_ms = DMEC_WDT_TIMEOUT_MAX * 1000;
-	set_bit(WDOG_HW_RUNNING, &wdd->status);
 
 	if (wdat->boot_cfg & DMEC_WDT_WIN_MODE)
 		dmec_wdt_config_win_mode(wdat);
@@ -469,8 +463,6 @@ static int dmec_wdt_probe(struct platform_device *pdev)
 	dmec_wdt_setup(wdat);
 
 	watchdog_set_nowayout(wdd, nowayout);
-	if (stop_on_reboot)
-		watchdog_stop_on_reboot(wdd);
 
 	ret = watchdog_register_device(wdd);
 	if (ret)
