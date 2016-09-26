@@ -145,7 +145,7 @@ static int dmec_gpio_pincount(struct dmec_gpio_priv *priv)
 
 static int dmec_gpio_get_version(struct gpio_chip *gc)
 {
-	struct device *dev = gc->parent;
+	struct device *dev = gc->dev;
 	struct dmec_gpio_priv *p = container_of(gc, struct dmec_gpio_priv,
 						gpio_chip);
 	unsigned int v;
@@ -261,7 +261,7 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 	gpio_chip = &priv->gpio_chip;
 	gpio_chip->label = "gpio-dmec";
 	gpio_chip->owner = THIS_MODULE;
-	gpio_chip->parent = dev;
+	gpio_chip->dev = dev;
 	gpio_chip->label = dev_name(dev);
 	gpio_chip->can_sleep = true;
 
@@ -286,7 +286,7 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 	irq_chip->irq_unmask = dmec_gpio_irq_enable;
 	irq_chip->irq_set_type = dmec_gpio_irq_set_type;
 
-	ret = devm_gpiochip_add_data(&pdev->dev, gpio_chip, priv);
+	ret = gpiochip_add(gpio_chip);
 	if (ret) {
 		dev_err(dev, "Could not register GPIO chip\n");
 		return ret;
@@ -296,7 +296,7 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 				   handle_simple_irq, IRQ_TYPE_NONE);
 	if (ret) {
 		dev_err(dev, "cannot add irqchip\n");
-		return ret;
+		goto error;
 	}
 
 	priv->irq = platform_get_irq(pdev, 0);
@@ -306,7 +306,7 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 					dev_name(dev), priv);
 	if (ret) {
 		dev_err(dev, "unable to get irq: %d\n", ret);
-		return ret;
+		goto error;
 	}
 
 	gpiochip_set_chained_irqchip(gpio_chip, irq_chip, priv->irq, NULL);
@@ -314,10 +314,17 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, priv);
 
 	return 0;
+error:
+	gpiochip_remove(gpio_chip);
+	return ret;
 }
 
 static int dmec_gpio_remove(struct platform_device *pdev)
 {
+	struct dmec_gpio_priv *p = platform_get_drvdata(pdev);
+
+	gpiochip_remove(&p->gpio_chip);
+
 	return 0;
 }
 
