@@ -241,7 +241,7 @@ static int dmec_register_cells(struct dmec_device_data *ec)
 		cells[n_dev++] = dmec_devs[DMEC_RTM];
 	}
 
-	return devm_mfd_add_devices(ec->dev, 0,
+	return mfd_add_devices(ec->dev, 0,
 				    cells, n_dev, NULL, 0, NULL);
 }
 
@@ -473,6 +473,8 @@ static int dmec_mfd_remove(struct platform_device *pdev)
 	struct dmec_device_data *ec = platform_get_drvdata(pdev);
 
 	sysfs_remove_group(&ec->dev->kobj, &ec_attr_group);
+
+	mfd_remove_devices(&pdev->dev);
 
 	return 0;
 }
