@@ -57,7 +57,8 @@ enum dmec_cells {
 	DMEC_GPIOA,
 	DMEC_GPIOB,
 	DMEC_WDT,
-	DMEC_RTM
+	DMEC_RTM,
+	DMEC_ACPI
 };
 
 struct dmec_features {
@@ -157,6 +158,10 @@ static struct mfd_cell dmec_devs[] = {
 	[DMEC_RTM] = {
 		.name = "dmec-rtm",
 	},
+	[DMEC_ACPI] = {
+		.name = "dmec-acpi",
+		.id = 0,
+	},
 };
 
 static void dmec_get_gpio_irqs(struct dmec_device_data *ec)
@@ -241,8 +246,10 @@ static int dmec_register_cells(struct dmec_device_data *ec)
 		cells[n_dev++] = dmec_devs[DMEC_RTM];
 	}
 
+	cells[n_dev++] = dmec_devs[DMEC_ACPI];
+
 	return mfd_add_devices(ec->dev, 0,
-				    cells, n_dev, NULL, 0, NULL);
+				cells, n_dev, NULL, 0, NULL);
 }
 
 static int dmec_read16(struct dmec_device_data *ec, u8 reg)
