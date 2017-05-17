@@ -1,5 +1,5 @@
 
-obj-m += dmec.o i2c-dmec.o gpio-dmec.o wdt-dmec.o rtm-dmec.o
+obj-m += dmec.o i2c-dmec.o gpio-dmec.o wdt-dmec.o rtm-dmec.o acpi-dmec.o
 dmec-objs = dmec-core.o
 
 PWD := $(shell pwd)
