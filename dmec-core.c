@@ -31,6 +31,8 @@
 #define DMEC_IRQCFG1			0x11
 #define DMEC_RTM_START			0x60
 #define DMEC_RTM_END			0x6e
+#define DMEC_PWM_START			0x80
+#define DMEC_PWM_END			0x88
 
 #define DMEC_MAX_GPIO_CHIPS		2
 
@@ -40,10 +42,12 @@
 #define DMEC_FEATURE_BIT_WDT		BIT(4)
 #define DMEC_FEATURE_BIT_GPIO		(3 << 6)
 
-#define DMEC_REG_MAX		0x7f
+#define DMEC_REG_MAX		0x88
 #define DMEC_MAX_DEVS		ARRAY_SIZE(dmec_devs)
 #define DMEC_MAX_IO_RES		2
 #define DMEC_STR_SZ		128
+
+#define FTRPWM				(1 << 5)   /* PWM support flag */
 
 static bool i_addr;
 module_param(i_addr, bool, 0644);
@@ -58,7 +62,8 @@ enum dmec_cells {
 	DMEC_GPIOB,
 	DMEC_WDT,
 	DMEC_RTM,
-	DMEC_ACPI
+	DMEC_ACPI,
+	DMEC_PWM
 };
 
 struct dmec_features {
@@ -150,6 +155,10 @@ static struct mfd_cell dmec_devs[] = {
 		.name = "dmec-acpi",
 		.id = 0,
 	},
+	[DMEC_PWM] = {
+		.name = "dmec-pwm",
+		.id = 0,
+	},
 };
 
 static void dmec_get_gpio_irqs(struct dmec_device_data *ec)
@@ -192,13 +201,39 @@ static void dmec_get_i2c_irq(struct dmec_device_data *ec)
 static int dmec_rtm_detect(struct dmec_device_data *ec)
 {
 	unsigned int val, n;
+	int ret = 0;
 
 	for (n = DMEC_RTM_START; n <= DMEC_RTM_END; n++) {
-		regmap_read(ec->regmap, n, &val);
-		if (val != 0xff)
+		ret = regmap_read(ec->regmap, n, &val);
+		if (val != 0xff && ret == 0)
 			return 1;
 	}
+	return 0;
+}
 
+static int dmec_pwm_detect(struct dmec_device_data *ec)
+{
+	unsigned int val = 0, n;
+	int ret = 0;
+
+	/* check PWM support */
+	ret = regmap_read(ec->regmap, DMEC_ECFTR0, &val);
+	if(ret < 0)
+	{
+		dev_err(ec->dev, "Cannot read Embedded Controller Information\n");
+		return -EPERM;
+	}
+	if(0 == (val & FTRPWM))
+	{
+		dev_err(ec->dev, "PWM is not supported\n");
+		return -ENODEV;
+	}
+
+	for (n = DMEC_PWM_START; n <= DMEC_PWM_END; n++) {
+		ret = regmap_read(ec->regmap, n, &val);
+		if (val != 0xff && ret == 0)
+			return 1;
+	}
 	return 0;
 }
 
@@ -226,6 +261,9 @@ static int dmec_register_cells(struct dmec_device_data *ec)
 
 	if (dmec_rtm_detect(ec))
 		cells[n_dev++] = dmec_devs[DMEC_RTM];
+
+	if (dmec_pwm_detect(ec))
+		cells[n_dev++] = dmec_devs[DMEC_PWM];
 
 	cells[n_dev++] = dmec_devs[DMEC_ACPI];
 
