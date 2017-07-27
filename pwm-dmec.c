@@ -53,9 +53,12 @@
 
 static bool GpioConfigured_0 = 0, GpioConfigured_1 = 0;
 
+enum pin {PIN0,PIN1,PIN01,NOPIN};
+
 struct dmec_pwm_chip {
 	struct pwm_chip chip;
 	struct regmap *regmap;
+	enum pin pin_value;
 };
 
 static struct mutex mutex;
@@ -327,6 +330,21 @@ static ssize_t dmec_pwm_version_show(struct device *dev,
 	regmap_read(dmecPwm->regmap, PWMREV, &val);
 
 	return scnprintf(buf, PAGE_SIZE, "%u.%u\n", (val >> 4) & 0xf, val & 0xf);
+}
+
+static ssize_t dmec_pwm_pin_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
+
+	if(dmecPwm->pin_value == PIN0)
+		return scnprintf(buf, PAGE_SIZE, "pin0\n");
+	else if(dmecPwm->pin_value == PIN1)
+		return scnprintf(buf, PAGE_SIZE, "pin1\n");
+	else if(dmecPwm->pin_value == PIN01)
+		return scnprintf(buf, PAGE_SIZE, "pin01\n");
+	else
+		return scnprintf(buf, PAGE_SIZE, "noPin\n");
 }
 
 static ssize_t dmec_pwm_mode_show(struct device *dev,
@@ -671,6 +689,7 @@ unlock:
 }
 
 static DEVICE_ATTR(version, S_IRUGO,dmec_pwm_version_show, NULL );
+static DEVICE_ATTR(pin, S_IRUGO,dmec_pwm_pin_show, NULL );
 static DEVICE_ATTR(mode,    S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_mode_show, dmec_pwm_mode_store );
 static DEVICE_ATTR(preScaler0,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_preScaler0_show, dmec_pwm_preScaler0_store );
 static DEVICE_ATTR(preScaler1,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_preScaler1_show, dmec_pwm_preScaler1_store );
@@ -681,6 +700,7 @@ static DEVICE_ATTR(scaler1,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_scaler1_show, dmec
 
 static struct attribute *pwm_attributeAll[]= {
 	&dev_attr_version.attr,
+	&dev_attr_pin.attr,
 	&dev_attr_mode.attr,
 	&dev_attr_preScaler0.attr,
 	&dev_attr_preScaler1.attr,
@@ -693,6 +713,7 @@ static struct attribute *pwm_attributeAll[]= {
 
 static struct attribute *pwm_attributeA[]= {
 	&dev_attr_version.attr,
+	&dev_attr_pin.attr,
 	&dev_attr_preScaler0.attr,
 	&dev_attr_alignment0.attr,
 	&dev_attr_scaler0.attr,
@@ -701,6 +722,7 @@ static struct attribute *pwm_attributeA[]= {
 
 static struct attribute *pwm_attributeB[]= {
 	&dev_attr_version.attr,
+	&dev_attr_pin.attr,
 	&dev_attr_preScaler1.attr,
 	&dev_attr_alignment1.attr,
 	&dev_attr_scaler1.attr,
@@ -752,6 +774,14 @@ static int dmec_pwm_probe(struct platform_device *pdev)
 		devm_kfree(&pdev->dev, dmecPwm);
 		return -ENODEV;
 	}
+	if ((GpioConfigured_0 == 1) && (GpioConfigured_1 == 1))
+		dmecPwm->pin_value = PIN01;
+	else if (GpioConfigured_0 == 1)
+		dmecPwm->pin_value = PIN0;
+	else if (GpioConfigured_1 == 1)
+		dmecPwm->pin_value = PIN1;
+	else
+		dmecPwm->pin_value = NOPIN;
 
 	ret = regmap_read(dmecPwm->regmap, PWMA_BASE + PWMCFG, &val);
 	channels[0].mode = (val & PWM16) ? 1 : 0;
