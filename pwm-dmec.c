@@ -22,6 +22,36 @@
 
 #include "dmec.h"
 
+#ifndef UINT32_MAX
+	#define UINT32_MAX 0xFFFFFFFF
+#endif
+
+#ifndef UINT16_MAX
+	#define UINT16_MAX 0xFFFF
+#endif
+
+#ifndef UINT8_MAX
+	#define UINT8_MAX 0xFF
+#endif
+
+#define PWM_SRC_CLK           50000000    /* default input clock is 50MHz */
+#define DMEC_PWM_CLK_GRANULARITY        (uint32_t)(1000000000/PWM_SRC_CLK)
+#define DMEC_PWM_GRANULARITY(p, s, a)   (uint32_t)(DMEC_PWM_CLK_GRANULARITY * (uint32_t)(1 << p) * (uint32_t)(s + 1) * (a?2:1))
+
+#define DMEC_PWM_MIN_STEPS              8
+#define DMEC_PWM_MAX_STEPS_8BIT         (uint32_t)UINT8_MAX
+#define DMEC_PWM_MAX_STEPS_16BIT        (uint32_t)UINT16_MAX
+
+#define DMEC_PWM_MODE_8BIT              0
+#define DMEC_PWM_MODE_16BIT             1
+
+#define DMEC_PWM_MIN_SCALER             0
+#define DMEC_PWM_MAX_SCALER             UINT8_MAX
+
+#define DMEC_PWM_MIN_PRESCALER_VALUE    0
+#define DMEC_PWM_MIN_PRESCALER          (1 << DMEC_PWM_MIN_PRESCALER_VALUE) 
+#define DMEC_PWM_MAX_PRESCALER_VALUE    7
+#define DMEC_PWM_MAX_PRESCALER          (1 << DMEC_PWM_MAX_PRESCALER_VALUE)
 
 #define   PWMREV              0x080       /* PWM version/revision register */
 #define   PWMA_BASE           0x081       /* PWM controller A register base */
@@ -55,13 +85,15 @@ static bool GpioConfigured_0 = 0, GpioConfigured_1 = 0;
 
 enum pin {PIN0,PIN1,PIN01,NOPIN};
 
+static struct regmap *regmap;
+static struct mutex mutex;
+
 struct dmec_pwm_chip {
 	struct pwm_chip chip;
-	struct regmap *regmap;
 	enum pin pin_value;
+	uint32_t minSteps;
+	uint32_t maxSteps;
 };
-
-static struct mutex mutex;
 
 typedef struct _dmec_pwm_channel {
 	struct pwm_state state;
@@ -73,6 +105,164 @@ typedef struct _dmec_pwm_channel {
 
 static dmec_pwm_channel channels[2];
 
+/**
+  
+  Calculate best match PWM parameters.
+
+  @param[in]    Period        Desired Period in ns.
+  @param[in]    MinSteps      Minimum number of steps, 0 means auto.
+  @param[in]    MaxSteps      Maximum number of steps, 0 means auto.
+  @param[in]    Align         0 = Left Aligned, 1 = Center aligned.
+  @param[in]    Mode          0 = 8Bit, 1 = 16Bit.
+  @param[out]   PreScaler     Returns calculated prescaler.
+  @param[out]   Scaler        Returns calculated channel scaler.
+  @param[out]   PeriodReg     Returns calculated period.
+  
+**/
+static int
+PwmCalcParms (uint32_t  Period,
+		uint32_t  MinSteps,
+		uint32_t  MaxSteps,
+		uint8_t   Align,
+		uint8_t   Mode,
+		uint8_t   *PreScaler,
+		uint8_t   *Scaler,
+		uint16_t  *PeriodReg
+)
+{
+  uint32_t PwmClk, PwmScl, PwmPer;
+  uint8_t PwmClkMatch = 0;
+  uint8_t  PwmSclMatch = 0;
+  uint16_t PwmPerMatch = 0;
+  uint32_t u32Deviation;
+  uint32_t u32lPeriod;
+  uint32_t u32LastDeviation = Period;
+  uint32_t TotalGranularity;
+  uint32_t MaxPeriod;
+  uint32_t MinPeriod;
+  uint32_t lMinSteps = MinSteps;
+  uint32_t lMaxSteps = MaxSteps;
+  uint8_t AlignMultiplier = Align?2:1;
+  uint8_t FoundParms = 0;
+  uint32_t Factor, Steps, TotalScaler;
+
+  
+  /* some sanity checking */
+  if (lMinSteps == 0) {
+    lMinSteps = DMEC_PWM_MIN_STEPS;
+  }
+  
+  if (((Mode == DMEC_PWM_MODE_8BIT) && (lMinSteps > DMEC_PWM_MAX_STEPS_8BIT)) || 
+      ((Mode == DMEC_PWM_MODE_16BIT) && (lMinSteps > DMEC_PWM_MAX_STEPS_16BIT))) {
+    return -1;
+  }
+  if (lMaxSteps == 0) {
+    if (Mode == DMEC_PWM_MODE_8BIT) {
+      lMaxSteps = DMEC_PWM_MAX_STEPS_8BIT;
+    } else {
+      lMaxSteps = DMEC_PWM_MAX_STEPS_16BIT;
+    }
+  }
+  
+  /* min/max period bounds-check for the requested configuration */
+  MaxPeriod = DMEC_PWM_CLK_GRANULARITY * (uint32_t)AlignMultiplier * lMaxSteps * (DMEC_PWM_MAX_SCALER + 1) * DMEC_PWM_MAX_PRESCALER;
+  MinPeriod = DMEC_PWM_CLK_GRANULARITY * (uint32_t)AlignMultiplier * lMinSteps * (DMEC_PWM_MIN_SCALER + 1) * DMEC_PWM_MIN_PRESCALER;
+
+  if ((MaxPeriod < Period) || (MinPeriod > Period)) {
+    return -1;
+  }    
+
+  /* iterate through all possible values and record the parameter 
+     combination with the least deviation
+ 
+    -> min(|Period - ((1 << PWMCLKx) * (PWMSCLx + 1) * PWMPERx / 50.000.000Hz)|)
+  
+  */
+  TotalGranularity = DMEC_PWM_CLK_GRANULARITY * AlignMultiplier;
+  Factor = Period/TotalGranularity; 
+  for (PwmClk = DMEC_PWM_MIN_PRESCALER_VALUE; PwmClk <= DMEC_PWM_MAX_PRESCALER_VALUE; PwmClk++) {
+    for (PwmScl = DMEC_PWM_MIN_SCALER; PwmScl <= DMEC_PWM_MAX_SCALER; PwmScl++) {
+      if (FoundParms) break;
+      TotalScaler = (PwmScl+1)*(1 << PwmClk);
+      Steps = Factor/TotalScaler;
+      /* quick check: skip period register loop if out of range */
+      if ((Steps > lMaxSteps) || (Steps < lMinSteps)) 
+          continue;
+      for (PwmPer = lMaxSteps; PwmPer >= lMinSteps; PwmPer--) {
+        if (FoundParms) break;
+        //check for UINT32 overflow, skip larger values
+        if (PwmPer > (UINT32_MAX / (TotalGranularity * TotalScaler))) {
+          PwmPer =  (UINT32_MAX / (TotalGranularity * TotalScaler)) + 1;
+          continue;
+        }
+        u32lPeriod = TotalGranularity * PwmPer * TotalScaler;
+        if (Period < u32lPeriod) {
+          u32Deviation = u32lPeriod - Period;
+        } else {
+          u32Deviation = Period - u32lPeriod;
+        }          
+        if (u32Deviation < u32LastDeviation) {
+          PwmClkMatch = (uint8_t)PwmClk;
+          PwmSclMatch = (uint8_t)PwmScl;
+          PwmPerMatch = (uint16_t)PwmPer;
+          u32LastDeviation = u32Deviation;
+          if (u32LastDeviation == 0) FoundParms = 1;
+        }
+      }
+    }
+  }
+
+  if (PreScaler != NULL) *PreScaler = (uint8_t)PwmClkMatch;
+  if (Scaler != NULL) *Scaler = (uint8_t)PwmSclMatch;
+  if (PreScaler != NULL) *PeriodReg = (uint16_t)PwmPerMatch;
+
+  return 0;
+}
+
+
+/**
+
+  Calculate duty cycle with remainder check.
+      
+  @param[in]        Duty          Duty cycle in ns
+  @param[in]        Granularity   PWM Granularity in ns
+  
+  @return           Duty Cycle value.
+
+**/
+uint16_t CalcDuty (uint32_t Duty, uint32_t Granularity
+    )
+{
+  if ((Duty % Granularity) > (Granularity/2)) return ((uint16_t)(1 + (Duty/Granularity)));
+  return ((uint16_t)(Duty/Granularity));
+}
+
+
+static int pwmWriteReg (uint8_t base, uint8_t reg, uint8_t value)
+{
+	int ret = 0;
+	mutex_lock(&mutex);
+	ret = regmap_write(regmap, base + reg, value);
+	mutex_unlock(&mutex);
+	return ret;
+}
+
+static int pwmConfigureWriteReg (uint8_t base, uint8_t reg, uint8_t value, uint8_t mask)
+{
+	int ret = 0;
+	unsigned int val = 0;
+	
+	ret = regmap_read(regmap, base + PWMCFG, &val);
+	if (ret < 0)
+		return -EPERM;
+
+	val &= ~mask;
+	val |= (uint8_t)(value);
+	
+	ret = pwmWriteReg (base, PWMCFG, val);
+	return ret;
+}
+
 static inline struct dmec_pwm_chip *to_dmec(struct pwm_chip *chip)
 {
 	return container_of(chip, struct dmec_pwm_chip, chip);
@@ -81,7 +271,6 @@ static inline struct dmec_pwm_chip *to_dmec(struct pwm_chip *chip)
 static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 				struct pwm_state *state)
 {
-	struct dmec_pwm_chip *dmecPwm = to_dmec(chip);
 	dmec_pwm_channel *channel;
 	int ret = 0;
 	unsigned int val;
@@ -112,7 +301,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	channel = &channels[index];
 
-	ret = regmap_read(dmecPwm->regmap, currentBaseReg + PWMCFG, &val);
+	ret = regmap_read(regmap, currentBaseReg + PWMCFG, &val);
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM config\n", pwm->label);
@@ -138,7 +327,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	channel->preScaler = val & PWMCLK_MASK;
 
 	/* scaler register */
-	ret = regmap_read(dmecPwm->regmap, currentBaseReg + PWMSCL, &val);
+	ret = regmap_read(regmap, currentBaseReg + PWMSCL, &val);
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM scaler\n", pwm->label);
@@ -147,7 +336,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	channel->scaler = val;
 
 	/* period state */
-	ret = regmap_read(dmecPwm->regmap, currentBaseReg + PWMPER, &val);
+	ret = regmap_read(regmap, currentBaseReg + PWMPER, &val);
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM period\n", pwm->label);
@@ -156,7 +345,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	channel->state.period = val;
 
 	/* duty state */
-	ret = regmap_read(dmecPwm->regmap, currentBaseReg + PWMDTY, &val);
+	ret = regmap_read(regmap, currentBaseReg + PWMDTY, &val);
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM duty-cycle\n", pwm->label);
@@ -168,11 +357,11 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	if(channels[0].mode)
 	{
 		/* period state */
-		ret = regmap_read(dmecPwm->regmap, PWMB_BASE + PWMPER, &val);
+		ret = regmap_read(regmap, PWMB_BASE + PWMPER, &val);
 		channel->state.period |= val << 8;
 		
 		/* duty state */
-		ret = regmap_read(dmecPwm->regmap, PWMB_BASE + PWMDTY, &val);
+		ret = regmap_read(regmap, PWMB_BASE + PWMDTY, &val);
 		channel->state.duty_cycle |= val << 8;
 	}
 
@@ -184,11 +373,14 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 {
 	struct dmec_pwm_chip *dmecPwm = to_dmec(chip);
 	dmec_pwm_channel *channel;
-	unsigned int val;
 	int ret = 0;
 	unsigned int currentBaseReg;
 	int index =0;
-	
+	uint8_t p,s;
+	uint16_t r;
+	uint32_t pPwmGranularity;
+	uint16_t  tempduty;
+
 	if (!state)
 		return -EINVAL;
 
@@ -218,35 +410,16 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	/* check enable request*/
 	if(channel->state.enabled != state->enabled)
 	{
-		ret = regmap_read(dmecPwm->regmap, currentBaseReg + PWMCFG, &val);
-		if (ret < 0)
-		{
-			dev_err(chip->dev, "%s: Failed to read PWMEN\n", 
-					pwm->label);
-			return -EPERM;
-		}
-
-		val &= ~PWMEN;
 		if(state->enabled)
-			val |= DMEC_PWM_EN_ON;
+			ret = pwmConfigureWriteReg (currentBaseReg, PWMCFG, DMEC_PWM_EN_ON, PWMEN);
 		else
-			val |= DMEC_PWM_EN_OFF;
-
-		mutex_lock(&mutex); 
-		ret = regmap_write(dmecPwm->regmap, currentBaseReg + PWMCFG, val);
+			ret = pwmConfigureWriteReg (currentBaseReg, PWMCFG, DMEC_PWM_EN_OFF, PWMEN);
 		if (ret < 0)
-			dev_err(chip->dev, "%s: Failed to enable/disable PWM\n", 
-					pwm->label);
-		mutex_unlock(&mutex);
+			dev_err(chip->dev, "Failed to to enable/disable PWM\n");
 		channel->state.enabled = state->enabled;
 	}
 
 	/* check period request */
-	if(channels[0].mode)
-		state->period = ((uint16_t)(state->period)) % 0x10000; /*mod 65536*/
-	else
-		state->period = ((uint8_t)(state->period)) % 0x100; /* mod 256 */
-
 	if(channel->state.period != state->period)
 	{
 		if (channel->state.enabled) /*channel is enable*/
@@ -256,65 +429,87 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			return -EBUSY;
 		}
 
-		mutex_lock(&mutex);
-		ret = regmap_write(dmecPwm->regmap, currentBaseReg + PWMPER, 
-				(uint8_t)state->period & 0xFF);
-		if(channels[0].mode) /*16bit*/
-			ret = regmap_write(dmecPwm->regmap, PWMB_BASE + PWMPER, 
-					(uint8_t)((state->period >> 8) & 0xFF));
-		mutex_unlock(&mutex);
-		channel->state.period = state->period;
+		ret = PwmCalcParms(state->period,
+				   dmecPwm->minSteps,
+				   dmecPwm->maxSteps,
+				   channel->alignment,
+				   channels[0].mode,
+				   &p,
+				   &s,
+				   &r);
+		if (ret < 0)
+		{
+			dev_err(chip->dev, "%s: Cannot change PWM period(value is unsupported)\n", 
+					pwm->label);
+			return -EPERM;
+		}
 
-		pwm_set_period(pwm, state->period);
+		pPwmGranularity = DMEC_PWM_GRANULARITY(p, s, channel->alignment);
+
+		ret = pwmWriteReg (currentBaseReg, PWMPER, (uint8_t)r & 0xFF);
+		if(channels[0].mode) /*16bit*/
+			ret = pwmWriteReg (PWMB_BASE, PWMPER,(uint8_t)((r >> 8) & 0xFF));
+		if (ret < 0)
+		{
+			dev_err(chip->dev, "%s: Cannot change PWM period\n", 
+					pwm->label);
+			return -EPERM;
+		}
+
+		channel->state.period = r * pPwmGranularity;
+		state->period = channel->state.period;
+		pwm_set_period(pwm, channel->state.period);
+
+		/* change pre scale*/
+		ret = pwmConfigureWriteReg (currentBaseReg, PWMCFG, p, PWMCLK_MASK);
+		if (ret < 0)
+			dev_err(chip->dev, "Failed to change PWM preScaler\n");
+		channel->preScaler = p;
+
+		/* change scaler*/
+		ret = pwmWriteReg (currentBaseReg, PWMSCL, s);
+		if (ret < 0)
+			dev_err(chip->dev, "Failed to change PWM Scaler\n");
+		channel->scaler = s;
+
+		/* duty cycle*/
+		tempduty = CalcDuty(channel->state.duty_cycle, pPwmGranularity);
+		ret = pwmWriteReg (currentBaseReg, PWMDTY, (uint8_t)(tempduty & 0xFF));
+		if(channels[0].mode) /* 16bit*/
+			ret = pwmWriteReg (PWMB_BASE, PWMDTY, (uint8_t)((tempduty >> 8)& 0xFF));
+		if (ret < 0)
+			dev_err(chip->dev, "Failed to change PWM duty cycle\n");
+		channel->state.duty_cycle = tempduty * pPwmGranularity ;
+		state->duty_cycle = channel->state.duty_cycle;
 	}
 
 	/* check duty-cycle */
-	if(channels[0].mode)
-		state->duty_cycle = ((uint16_t)(state->duty_cycle)) % 0x10000;
-	else
-		state->duty_cycle = ((uint8_t)(state->duty_cycle)) % 0x100;
-
 	if(channel->state.duty_cycle != state->duty_cycle)
 	{
-		mutex_lock(&mutex);
-		ret = regmap_write(dmecPwm->regmap, currentBaseReg + PWMDTY, 
-				(uint8_t)(state->duty_cycle & 0xFF));
+		pPwmGranularity = DMEC_PWM_GRANULARITY(channel->preScaler, channel->scaler, channel->alignment);
+
+		if(state->duty_cycle > channel->state.period)
+			state->duty_cycle = channel->state.period;
+
+		tempduty = (uint16_t)CalcDuty(state->duty_cycle, pPwmGranularity);
+		ret = pwmWriteReg (currentBaseReg, PWMDTY, (uint8_t)(tempduty & 0xFF));
 		if(channels[0].mode) /* 16bit*/
-			ret = regmap_write(dmecPwm->regmap, PWMB_BASE + PWMDTY, 
-					(uint8_t)((state->duty_cycle >> 8) & 0xFF));
-		mutex_unlock(&mutex);
-		channel->state.duty_cycle = state->duty_cycle;
-		pwm_set_duty_cycle(pwm, state->duty_cycle);
+			ret = pwmWriteReg (PWMB_BASE, PWMDTY, (uint8_t)((tempduty >> 8)& 0xFF));
+		if (ret < 0)
+			dev_err(chip->dev, "Failed to change PWM duty cycle\n");
+		channel->state.duty_cycle = tempduty * pPwmGranularity ;
+		state->duty_cycle = channel->state.duty_cycle;
 	}
 
 	/* check polarity */
 	if(channel->state.polarity != state->polarity)
 	{
-		if (channel->state.enabled) /*channel is enable*/
-		{
-			dev_err(chip->dev, "%s: Cannot change PWM polarity while enabled\n", pwm->label);
-			return -EBUSY;
-		}
-		ret = regmap_read(dmecPwm->regmap, currentBaseReg + PWMCFG, &val);
-		if (ret < 0)
-		{
-			dev_err(chip->dev, "%s: Failed to read PWMConfig\n", pwm->label);
-			return -EPERM;
-		}
-
-		val &= ~PWMPOL;
-
 		if(state->polarity == PWM_POLARITY_NORMAL)
-			val |= PWMPOL;
+			ret = pwmConfigureWriteReg (currentBaseReg, PWMCFG, PWMPOL, PWMPOL);
 		else
-			val |= 0;
-
-		mutex_lock(&mutex); 
-		ret = regmap_write(dmecPwm->regmap, currentBaseReg + PWMCFG, val);
+			ret = pwmConfigureWriteReg (currentBaseReg, PWMCFG, 0, PWMPOL);
 		if (ret < 0)
-			dev_err(chip->dev, "%s: Failed to change PWM polarity\n", 
-					pwm->label);
-		mutex_unlock(&mutex);
+			dev_err(chip->dev, "Failed to change PWM preScaler\n");
 		channel->state.polarity = state->polarity;
 	}
 	
@@ -325,9 +520,8 @@ static ssize_t dmec_pwm_version_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned int val = 0;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 
-	regmap_read(dmecPwm->regmap, PWMREV, &val);
+	regmap_read(regmap, PWMREV, &val);
 
 	return scnprintf(buf, PAGE_SIZE, "%u.%u\n", (val >> 4) & 0xf, val & 0xf);
 }
@@ -369,7 +563,7 @@ static ssize_t dmec_pwm_mode_store(struct device *dev,
 		if ((channels[0].mode != convertedValue) && 
 		    (convertedValue == 0 || convertedValue == 1)) /*mode change request*/
 		{
-			ret = regmap_read(dmecPwm->regmap, PWMA_BASE + PWMCFG, &val);
+			ret = regmap_read(regmap, PWMA_BASE + PWMCFG, &val);
 			if (ret < 0)
 			{
 				dev_err(dev, "Failed to read PWM Mode\n");
@@ -391,12 +585,12 @@ static ssize_t dmec_pwm_mode_store(struct device *dev,
 
 			if(channels[1].state.enabled)
 			{
-				ret = regmap_read(dmecPwm->regmap, PWMB_BASE + PWMCFG, &valB);
+				ret = regmap_read(regmap, PWMB_BASE + PWMCFG, &valB);
 				valB &= ~PWMEN;
 				valB |= DMEC_PWM_EN_OFF;
 
 				mutex_lock(&mutex); 
-				ret = regmap_write(dmecPwm->regmap, PWMB_BASE + PWMCFG, valB);
+				ret = regmap_write(regmap, PWMB_BASE + PWMCFG, valB);
 				if (ret < 0)
 				{
 					dev_err(dev, "Failed to disable second PWM\n");
@@ -409,7 +603,7 @@ static ssize_t dmec_pwm_mode_store(struct device *dev,
 			}
 
 			mutex_lock(&mutex); 
-			ret = regmap_write(dmecPwm->regmap, PWMA_BASE + PWMCFG, val);
+			ret = regmap_write(regmap, PWMA_BASE + PWMCFG, val);
 			if (ret < 0)
 			{
 				dev_err(dev, "Failed to change PWM mode\n");
@@ -431,95 +625,6 @@ unlock:
 	return ret;
 }
 
-static ssize_t dmec_pwm_preScaler0_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%u\n", channels[0].preScaler);
-}
-
-static ssize_t dmec_pwm_preScaler0_store(struct device *dev,
-				struct device_attribute *attr, const char *buf,
-				size_t count)
-{
-	unsigned int val = 0;
-	int ret = 0;
-	long convertedValue;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
-
-	if (!kstrtol(buf, 10, &convertedValue)) {
-		if ((channels[0].preScaler != convertedValue) && 
-		    (convertedValue >= 0 &&  convertedValue <= 7)) /*preScaler change request*/
-		{
-			ret = regmap_read(dmecPwm->regmap, PWMA_BASE + PWMCFG, &val);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to read PWM preScaler\n");
-				return -EPERM;
-			}
-			val &= ~PWMCLK_MASK;
-			val |= (uint8_t)(convertedValue);
-
-			mutex_lock(&mutex);
-			ret = regmap_write(dmecPwm->regmap, PWMA_BASE + PWMCFG, val);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to change PWM preScaler\n");
-				goto unlock;
-			}
-			channels[0].preScaler = convertedValue;
-unlock:
-			mutex_unlock(&mutex);
-		}
-		ret = count;
-	}
-	return ret;
-}
-
-static ssize_t dmec_pwm_preScaler1_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%u\n", channels[1].preScaler);
-}
-
-static ssize_t dmec_pwm_preScaler1_store(struct device *dev,
-				struct device_attribute *attr, const char *buf,
-				size_t count)
-{
-	unsigned int val = 0;
-	int ret = 0;
-	long convertedValue;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
-
-	if (!kstrtol(buf, 10, &convertedValue)) {
-		if ((channels[1].preScaler != convertedValue) && 
-		    (convertedValue >= 0 &&  convertedValue <= 7)) /*preScaler change request*/
-		{
-			ret = regmap_read(dmecPwm->regmap, PWMB_BASE + PWMCFG, &val);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to read PWM preScaler\n");
-				return -EPERM;
-			}
-			val &= ~PWMCLK_MASK;
-			val |= (uint8_t)(convertedValue);
-
-			mutex_lock(&mutex); 
-
-			ret = regmap_write(dmecPwm->regmap, PWMB_BASE + PWMCFG, val);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to change PWM preScaler\n");
-				goto unlock;
-			}
-			channels[1].preScaler = convertedValue;
-unlock:
-			mutex_unlock(&mutex);
-		}
-		ret = count;
-	}
-	return ret;
-}
-
 static ssize_t dmec_pwm_alignment0_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -530,38 +635,22 @@ static ssize_t dmec_pwm_alignment0_store(struct device *dev,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
 {
-	unsigned int val = 0;
 	int ret = 0;
 	long convertedValue;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 
 	if (!kstrtol(buf, 10, &convertedValue)) {
 		if ((channels[0].alignment != convertedValue) && 
 		    (convertedValue == 0 ||  convertedValue == 1)) /*alignment change request*/
 		{
-			ret = regmap_read(dmecPwm->regmap, PWMA_BASE + PWMCFG, &val);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to read PWM alignment\n");
-				return -EPERM;
-			}
-			val &= ~PWMCA;
 			if(convertedValue)
-				val |= DMEC_PWM_CA_CENTER;
+				ret = pwmConfigureWriteReg (PWMA_BASE, PWMCFG, DMEC_PWM_CA_CENTER, PWMCA);
 			else
-				val |= DMEC_PWM_CA_LEFT;
+				ret = pwmConfigureWriteReg (PWMA_BASE, PWMCFG, DMEC_PWM_CA_LEFT, PWMCA);
 
-			mutex_lock(&mutex); 
-
-			ret = regmap_write(dmecPwm->regmap, PWMA_BASE + PWMCFG, val);
-			if (ret < 0)
-			{
+			if(ret < 0)
 				dev_err(dev, "Failed to change PWM alignment\n");
-				goto unlock;
-			}
-			channels[0].alignment = convertedValue;
-unlock:
-			mutex_unlock(&mutex);
+			else
+				channels[0].alignment = convertedValue;
 		}
 		ret = count;
 	}
@@ -578,154 +667,114 @@ static ssize_t dmec_pwm_alignment1_store(struct device *dev,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
 {
-	unsigned int val = 0;
 	int ret = 0;
 	long convertedValue;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 
 	if (!kstrtol(buf, 10, &convertedValue)) {
 		if ((channels[1].alignment != convertedValue) && 
 		    (convertedValue == 0 ||  convertedValue == 1)) /*alignment change request*/
 		{
-			ret = regmap_read(dmecPwm->regmap, PWMB_BASE + PWMCFG, &val);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to read PWM alignment\n");
-				return -EPERM;
-			}
-			val &= ~PWMCA;
 			if(convertedValue)
-				val |= DMEC_PWM_CA_CENTER;
+				ret = pwmConfigureWriteReg (PWMB_BASE, PWMCFG, DMEC_PWM_CA_CENTER, PWMCA);
 			else
-				val |= DMEC_PWM_CA_LEFT;
+				ret = pwmConfigureWriteReg (PWMB_BASE, PWMCFG, DMEC_PWM_CA_LEFT, PWMCA);
 
-			mutex_lock(&mutex); 
-
-			ret = regmap_write(dmecPwm->regmap, PWMB_BASE + PWMCFG, val);
-			if (ret < 0)
-			{
+			if(ret < 0)
 				dev_err(dev, "Failed to change PWM alignment\n");
-				goto unlock;
-			}
-			channels[1].alignment = convertedValue;
-unlock:
-			mutex_unlock(&mutex);
+			else
+				channels[1].alignment = convertedValue;
 		}
 		ret = count;
 	}
 	return ret;
 }
 
-static ssize_t dmec_pwm_scaler0_show(struct device *dev,
+static ssize_t dmec_pwm_minSteps_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%u\n", channels[0].scaler);
+	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", dmecPwm->minSteps);
 }
 
-static ssize_t dmec_pwm_scaler0_store(struct device *dev,
+static ssize_t dmec_pwm_minSteps_store(struct device *dev,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
 {
+	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 	int ret = 0;
 	long convertedValue;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 
 	if (!kstrtol(buf, 10, &convertedValue)) {
-		if ((channels[0].scaler != convertedValue) && 
-		    (convertedValue >= 0 &&  convertedValue <= 255)) /*scaler change request*/
-		{
-
-			mutex_lock(&mutex); 
-
-			ret = regmap_write(dmecPwm->regmap, PWMA_BASE + PWMSCL, convertedValue);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to change PWM scaler\n");
-				goto unlock;
-			}
-			channels[0].scaler = convertedValue;
-unlock:
-			mutex_unlock(&mutex);
-		}
+		dmecPwm->minSteps = (uint32_t)convertedValue;
 		ret = count;
 	}
 	return ret;
 }
 
-static ssize_t dmec_pwm_scaler1_show(struct device *dev,
+static ssize_t dmec_pwm_maxSteps_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	return scnprintf(buf, PAGE_SIZE, "%u\n", channels[1].scaler);
+	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", dmecPwm->maxSteps);
 }
 
-static ssize_t dmec_pwm_scaler1_store(struct device *dev,
+static ssize_t dmec_pwm_maxSteps_store(struct device *dev,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
 {
+	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 	int ret = 0;
 	long convertedValue;
-	struct dmec_pwm_chip *dmecPwm = dev_get_drvdata(dev);
 
 	if (!kstrtol(buf, 10, &convertedValue)) {
-		if ((channels[1].scaler != convertedValue) && 
-		    (convertedValue >= 0 &&  convertedValue <= 255)) /*scaler change request*/
-		{
-
-			mutex_lock(&mutex); 
-
-			ret = regmap_write(dmecPwm->regmap, PWMB_BASE + PWMSCL, convertedValue);
-			if (ret < 0)
-			{
-				dev_err(dev, "Failed to change PWM scaler\n");
-				goto unlock;
-			}
-			channels[1].scaler = convertedValue;
-unlock:
-			mutex_unlock(&mutex);
-		}
-		ret =count;
+		dmecPwm->maxSteps = (uint32_t)convertedValue;
+		ret = count;
 	}
 	return ret;
 }
+
+
+
+
+
+
 
 static DEVICE_ATTR(version, S_IRUGO,dmec_pwm_version_show, NULL );
 static DEVICE_ATTR(pin, S_IRUGO,dmec_pwm_pin_show, NULL );
 static DEVICE_ATTR(mode,    S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_mode_show, dmec_pwm_mode_store );
-static DEVICE_ATTR(preScaler0,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_preScaler0_show, dmec_pwm_preScaler0_store );
-static DEVICE_ATTR(preScaler1,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_preScaler1_show, dmec_pwm_preScaler1_store );
 static DEVICE_ATTR(alignment0,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_alignment0_show, dmec_pwm_alignment0_store );
 static DEVICE_ATTR(alignment1,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_alignment1_show, dmec_pwm_alignment1_store );
-static DEVICE_ATTR(scaler0,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_scaler0_show, dmec_pwm_scaler0_store );
-static DEVICE_ATTR(scaler1,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_scaler1_show, dmec_pwm_scaler1_store );
+static DEVICE_ATTR(minSteps,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_minSteps_show, dmec_pwm_minSteps_store );
+static DEVICE_ATTR(maxSteps,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_maxSteps_show, dmec_pwm_maxSteps_store );
 
 static struct attribute *pwm_attributeAll[]= {
 	&dev_attr_version.attr,
 	&dev_attr_pin.attr,
 	&dev_attr_mode.attr,
-	&dev_attr_preScaler0.attr,
-	&dev_attr_preScaler1.attr,
 	&dev_attr_alignment0.attr,
 	&dev_attr_alignment1.attr,
-	&dev_attr_scaler0.attr,
-	&dev_attr_scaler1.attr,
+	&dev_attr_minSteps.attr,
+	&dev_attr_maxSteps.attr,
 	NULL
 };
 
 static struct attribute *pwm_attributeA[]= {
 	&dev_attr_version.attr,
 	&dev_attr_pin.attr,
-	&dev_attr_preScaler0.attr,
 	&dev_attr_alignment0.attr,
-	&dev_attr_scaler0.attr,
+	&dev_attr_minSteps.attr,
+	&dev_attr_maxSteps.attr,
 	NULL
 };
 
 static struct attribute *pwm_attributeB[]= {
 	&dev_attr_version.attr,
 	&dev_attr_pin.attr,
-	&dev_attr_preScaler1.attr,
 	&dev_attr_alignment1.attr,
-	&dev_attr_scaler1.attr,
+	&dev_attr_minSteps.attr,
+	&dev_attr_maxSteps.attr,
 	NULL
 };
 
@@ -759,10 +808,13 @@ static int dmec_pwm_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	dmecPwm->regmap = dmec_get_regmap(pdev->dev.parent);
+	regmap = dmec_get_regmap(pdev->dev.parent);
+
+	dmecPwm->minSteps = 0;
+	dmecPwm->maxSteps = 0;
 
 	/* check pwm is set in corresponding GPIOA-4 and GPIOA-5 pin in BIOS */
-	ret = regmap_read(dmecPwm->regmap, DMEC_PWM_PAR1, &val);
+	ret = regmap_read(regmap, DMEC_PWM_PAR1, &val);
 	if(((val >> DMEC_PWM_CHANNEL0_GPIO_OFF) & PAX_MASK) == DMEC_PWM_GPIO_FCNT)
 		GpioConfigured_0 = 1;
 	if (((val >> DMEC_PWM_CHANNEL1_GPIO_OFF) & PAX_MASK) == DMEC_PWM_GPIO_FCNT)
@@ -783,7 +835,7 @@ static int dmec_pwm_probe(struct platform_device *pdev)
 	else
 		dmecPwm->pin_value = NOPIN;
 
-	ret = regmap_read(dmecPwm->regmap, PWMA_BASE + PWMCFG, &val);
+	ret = regmap_read(regmap, PWMA_BASE + PWMCFG, &val);
 	channels[0].mode = (val & PWM16) ? 1 : 0;
 	channels[1].mode = 0;
 
