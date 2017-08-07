@@ -101,6 +101,7 @@ typedef struct _dmec_pwm_channel {
 	uint8_t preScaler;
 	uint8_t scaler;
 	uint8_t alignment;
+	uint32_t granularity;
 }dmec_pwm_channel;
 
 static dmec_pwm_channel channels[2];
@@ -146,7 +147,6 @@ PwmCalcParms (uint32_t  Period,
   uint8_t FoundParms = 0;
   uint32_t Factor, Steps, TotalScaler;
 
-  
   /* some sanity checking */
   if (lMinSteps == 0) {
     lMinSteps = DMEC_PWM_MIN_STEPS;
@@ -241,6 +241,7 @@ uint16_t CalcDuty (uint32_t Duty, uint32_t Granularity
 static int pwmWriteReg (uint8_t base, uint8_t reg, uint8_t value)
 {
 	int ret = 0;
+
 	mutex_lock(&mutex);
 	ret = regmap_write(regmap, base + reg, value);
 	mutex_unlock(&mutex);
@@ -251,7 +252,7 @@ static int pwmConfigureWriteReg (uint8_t base, uint8_t reg, uint8_t value, uint8
 {
 	int ret = 0;
 	unsigned int val = 0;
-	
+
 	ret = regmap_read(regmap, base + PWMCFG, &val);
 	if (ret < 0)
 		return -EPERM;
@@ -378,7 +379,6 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	int index =0;
 	uint8_t p,s;
 	uint16_t r;
-	uint32_t pPwmGranularity;
 	uint16_t  tempduty;
 
 	if (!state)
@@ -444,8 +444,7 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			return -EPERM;
 		}
 
-		pPwmGranularity = DMEC_PWM_GRANULARITY(p, s, channel->alignment);
-
+		channel->granularity = DMEC_PWM_GRANULARITY(p, s, channel->alignment);
 		ret = pwmWriteReg (currentBaseReg, PWMPER, (uint8_t)r & 0xFF);
 		if(channels[0].mode) /*16bit*/
 			ret = pwmWriteReg (PWMB_BASE, PWMPER,(uint8_t)((r >> 8) & 0xFF));
@@ -456,7 +455,7 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			return -EPERM;
 		}
 
-		channel->state.period = r * pPwmGranularity;
+		channel->state.period = r * channel->granularity;
 		state->period = channel->state.period;
 		pwm_set_period(pwm, channel->state.period);
 
@@ -473,31 +472,31 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		channel->scaler = s;
 
 		/* duty cycle*/
-		tempduty = CalcDuty(channel->state.duty_cycle, pPwmGranularity);
+		tempduty = CalcDuty(channel->state.duty_cycle, channel->granularity);
 		ret = pwmWriteReg (currentBaseReg, PWMDTY, (uint8_t)(tempduty & 0xFF));
 		if(channels[0].mode) /* 16bit*/
 			ret = pwmWriteReg (PWMB_BASE, PWMDTY, (uint8_t)((tempduty >> 8)& 0xFF));
 		if (ret < 0)
 			dev_err(chip->dev, "Failed to change PWM duty cycle\n");
-		channel->state.duty_cycle = tempduty * pPwmGranularity ;
+		channel->state.duty_cycle = tempduty * channel->granularity ;
 		state->duty_cycle = channel->state.duty_cycle;
 	}
 
 	/* check duty-cycle */
 	if(channel->state.duty_cycle != state->duty_cycle)
 	{
-		pPwmGranularity = DMEC_PWM_GRANULARITY(channel->preScaler, channel->scaler, channel->alignment);
+		channel->granularity = DMEC_PWM_GRANULARITY(channel->preScaler, channel->scaler, channel->alignment);
 
 		if(state->duty_cycle > channel->state.period)
 			state->duty_cycle = channel->state.period;
 
-		tempduty = (uint16_t)CalcDuty(state->duty_cycle, pPwmGranularity);
+		tempduty = (uint16_t)CalcDuty(state->duty_cycle, channel->granularity);
 		ret = pwmWriteReg (currentBaseReg, PWMDTY, (uint8_t)(tempduty & 0xFF));
 		if(channels[0].mode) /* 16bit*/
 			ret = pwmWriteReg (PWMB_BASE, PWMDTY, (uint8_t)((tempduty >> 8)& 0xFF));
 		if (ret < 0)
 			dev_err(chip->dev, "Failed to change PWM duty cycle\n");
-		channel->state.duty_cycle = tempduty * pPwmGranularity ;
+		channel->state.duty_cycle = tempduty * channel->granularity ;
 		state->duty_cycle = channel->state.duty_cycle;
 	}
 
@@ -735,11 +734,17 @@ static ssize_t dmec_pwm_maxSteps_store(struct device *dev,
 	return ret;
 }
 
+static ssize_t dmec_pwm_granularity0_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", channels[0].granularity);
+}
 
-
-
-
-
+static ssize_t dmec_pwm_granularity1_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", channels[1].granularity);
+}
 
 static DEVICE_ATTR(version, S_IRUGO,dmec_pwm_version_show, NULL );
 static DEVICE_ATTR(pin, S_IRUGO,dmec_pwm_pin_show, NULL );
@@ -748,6 +753,8 @@ static DEVICE_ATTR(alignment0,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_alignment0_show
 static DEVICE_ATTR(alignment1,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_alignment1_show, dmec_pwm_alignment1_store );
 static DEVICE_ATTR(minSteps,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_minSteps_show, dmec_pwm_minSteps_store );
 static DEVICE_ATTR(maxSteps,  S_IRUGO|S_IWUSR|S_IWGRP,dmec_pwm_maxSteps_show, dmec_pwm_maxSteps_store );
+static DEVICE_ATTR(granularity0, S_IRUGO,dmec_pwm_granularity0_show, NULL );
+static DEVICE_ATTR(granularity1, S_IRUGO,dmec_pwm_granularity1_show, NULL );
 
 static struct attribute *pwm_attributeAll[]= {
 	&dev_attr_version.attr,
@@ -757,6 +764,8 @@ static struct attribute *pwm_attributeAll[]= {
 	&dev_attr_alignment1.attr,
 	&dev_attr_minSteps.attr,
 	&dev_attr_maxSteps.attr,
+	&dev_attr_granularity0.attr,
+	&dev_attr_granularity1.attr,
 	NULL
 };
 
@@ -766,6 +775,7 @@ static struct attribute *pwm_attributeA[]= {
 	&dev_attr_alignment0.attr,
 	&dev_attr_minSteps.attr,
 	&dev_attr_maxSteps.attr,
+	&dev_attr_granularity0.attr,
 	NULL
 };
 
@@ -775,6 +785,7 @@ static struct attribute *pwm_attributeB[]= {
 	&dev_attr_alignment1.attr,
 	&dev_attr_minSteps.attr,
 	&dev_attr_maxSteps.attr,
+	&dev_attr_granularity1.attr,
 	NULL
 };
 
@@ -874,7 +885,16 @@ static int dmec_pwm_probe(struct platform_device *pdev)
 static int dmec_pwm_remove(struct platform_device *pdev)
 {
 	struct dmec_pwm_chip *dmecPwm = platform_get_drvdata(pdev);
-	return pwmchip_remove(&dmecPwm->chip);
+	int err;
+
+	err = pwmchip_remove(&dmecPwm->chip);
+	if(err < 0)
+	{
+		dev_err(&pdev->dev, "remove pwm driver failed: %d\n", err); 
+		return err;
+	}
+	dev_dbg(&pdev->dev, "pwm driver removed.");
+	return 0;
 }
 
 static const struct of_device_id dmecPwm_of_match[] = {
