@@ -231,7 +231,7 @@ static void dmec_gpio_irq_ack(struct irq_data *d)
 static irqreturn_t dmec_gpio_irq_handler(int irq, void *dev_id)
 {
 	struct dmec_gpio_priv *p = dev_id;
-	struct irq_domain *d = p->gpio_chip.irqdomain;
+	struct irq_domain *d = p->gpio_chip.irq.domain;
 	unsigned int stat, pending;
 	unsigned long flags;
 
