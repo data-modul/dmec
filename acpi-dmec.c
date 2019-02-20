@@ -21,6 +21,9 @@
 
 static struct regmap *regmap;
 
+#define SCOPE_LPCB "\\_SB.PCI0.LPCB.DMEC."
+#define SCOPE_SBRG "\\_SB.PCI0.SBRG.DMEC."
+
 static unsigned long long dmec_acpi_get_data(char* input, int inparam)
 {
 	acpi_status status;
@@ -29,10 +32,17 @@ static unsigned long long dmec_acpi_get_data(char* input, int inparam)
 	union acpi_object *result_buffer;
 	struct acpi_object_list list_arg;
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL};
+	char path[30];
 
-	status = acpi_get_handle(NULL, (acpi_string) input, &handle);
+	snprintf(path, sizeof(SCOPE_LPCB) + sizeof(input), SCOPE_LPCB"%s", input);
+	status = acpi_get_handle(NULL, (acpi_string) path, &handle);
 	if(ACPI_FAILURE(status))
-		return  0xFFFFFFFF;
+	{
+		snprintf(path, sizeof(SCOPE_SBRG) + sizeof(input), SCOPE_SBRG"%s", input);
+		status = acpi_get_handle(NULL, (acpi_string) path, &handle);
+		if(ACPI_FAILURE(status))
+			return  0xFFFFFFFF;
+	}
 
 	arg.type = ACPI_TYPE_INTEGER;
 	arg.integer.value = inparam;
@@ -53,7 +63,7 @@ static ssize_t dmec_acpi_cpu_fan(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.FSPW", 0x00);
+	val = dmec_acpi_get_data("FSPW", 0x00);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -62,7 +72,7 @@ static ssize_t dmec_acpi_sys_fan(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.FSPW", 0x01);
+	val = dmec_acpi_get_data("FSPW", 0x01);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -71,7 +81,7 @@ static ssize_t dmec_acpi_cpu_temperature(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.TMPW", 0x00);
+	val = dmec_acpi_get_data("TMPW", 0x00);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -80,7 +90,7 @@ static ssize_t dmec_acpi_chipset_temperature(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.TMPW", 0x01);
+	val = dmec_acpi_get_data("TMPW", 0x01);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -89,7 +99,7 @@ static ssize_t dmec_acpi_system_temperature(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.TMPW", 0x02);
+	val = dmec_acpi_get_data("TMPW", 0x02);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -98,7 +108,7 @@ static ssize_t dmec_acpi_vcore_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x00);
+	val = dmec_acpi_get_data("HVTW", 0x00);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -107,7 +117,7 @@ static ssize_t dmec_acpi_2v5_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x01);
+	val = dmec_acpi_get_data("HVTW", 0x01);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -116,7 +126,7 @@ static ssize_t dmec_acpi_3v3_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x02);
+	val = dmec_acpi_get_data("HVTW", 0x02);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -125,7 +135,7 @@ static ssize_t dmec_acpi_vbat_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x03);
+	val = dmec_acpi_get_data("HVTW", 0x03);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -134,7 +144,7 @@ static ssize_t dmec_acpi_5v_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x04);
+	val = dmec_acpi_get_data("HVTW", 0x04);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -143,7 +153,7 @@ static ssize_t dmec_acpi_5vsb_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x05);
+	val = dmec_acpi_get_data("HVTW", 0x05);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
@@ -152,7 +162,7 @@ static ssize_t dmec_acpi_12v_voltage(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	unsigned long long val = 0;
-	val = dmec_acpi_get_data("\\_SB.PCI0.LPCB.DMEC.HVTW", 0x06);
+	val = dmec_acpi_get_data("HVTW", 0x06);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", val);
 }
