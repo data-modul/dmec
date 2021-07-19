@@ -257,6 +257,7 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 	struct dmec_gpio_priv *priv;
 	struct gpio_chip *gpio_chip;
 	struct irq_chip *irq_chip;
+	struct gpio_irq_chip *gcirq;
 	int ret = 0;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -269,7 +270,11 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 	gpio_chip = &priv->gpio_chip;
 	gpio_chip->owner = THIS_MODULE;
 	gpio_chip->parent = dev;
+	#if 0
 	gpio_chip->label = dev_name(dev);
+	#else
+	gpio_chip->label = devm_kasprintf(&pdev->dev, GFP_KERNEL, "DMEC GPIO Bank %c", (pdev->id == 0)?'A':'B');
+	#endif
 	gpio_chip->base = -1;
 
 	gpio_chip->direction_input = dmec_gpio_direction_input;
@@ -284,35 +289,37 @@ static int dmec_gpio_probe(struct platform_device *pdev)
 	}
 
 	raw_spin_lock_init(&priv->lock);
-	irq_chip = &priv->irq_chip;
-	irq_chip->name = dev_name(dev);
-	irq_chip->irq_mask = dmec_gpio_irq_disable;
-	irq_chip->irq_unmask = dmec_gpio_irq_enable;
-	irq_chip->irq_set_type = dmec_gpio_irq_set_type;
-	irq_chip->irq_ack = dmec_gpio_irq_ack;
+	if (pdev->num_resources != 0) {
+		priv->irq = platform_get_irq(pdev, 0);
+		dev_info(dev, "%s: IRQ = 0x%x.\n", __func__, priv->irq);
+		if (priv->irq) {
+			irq_chip = &priv->irq_chip;
+			irq_chip->name = dev_name(dev);
+			irq_chip->irq_mask = dmec_gpio_irq_disable;
+			irq_chip->irq_unmask = dmec_gpio_irq_enable;
+			irq_chip->irq_set_type = dmec_gpio_irq_set_type;
+			irq_chip->irq_ack = dmec_gpio_irq_ack;
 
+			gcirq = &gpio_chip->irq;
+			gcirq->chip = irq_chip;
+			gcirq->parent_handler = NULL;
+			gcirq->num_parents = 0;
+			gcirq->default_type = IRQ_TYPE_NONE;
+			gcirq->handler = handle_bad_irq;
+	
+			ret = devm_request_irq(dev, priv->irq, dmec_gpio_irq_handler,
+					       IRQF_ONESHOT | IRQF_SHARED,
+					       dev_name(dev), priv);
+			if (ret) {
+				dev_err(dev, "unable to get irq: %d\n", ret);
+				return ret;
+			}
+		}
+	}
+	
 	ret = devm_gpiochip_add_data(&pdev->dev, gpio_chip, priv);
 	if (ret) {
 		dev_err(dev, "Could not register GPIO chip\n");
-		return ret;
-	}
-
-	ret = gpiochip_irqchip_add(gpio_chip, irq_chip, 0,
-				   handle_bad_irq, IRQ_TYPE_NONE);
-	if (ret) {
-		dev_err(dev, "cannot add irqchip\n");
-		return ret;
-	}
-
-	priv->irq = platform_get_irq(pdev, 0);
-	gpiochip_set_chained_irqchip(gpio_chip, irq_chip,
-				     priv->irq, NULL);
-
-	ret = devm_request_irq(dev, priv->irq, dmec_gpio_irq_handler,
-			       IRQF_ONESHOT | IRQF_SHARED,
-			       dev_name(dev), priv);
-	if (ret) {
-		dev_err(dev, "unable to get irq: %d\n", ret);
 		return ret;
 	}
 

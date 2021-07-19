@@ -370,7 +370,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 }
 
 static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm, 
-				struct pwm_state *state)
+				const struct pwm_state *state)
 {
 	struct dmec_pwm_chip *dmecPwm = to_dmec(chip);
 	dmec_pwm_channel *channel;
@@ -456,7 +456,6 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		}
 
 		channel->state.period = r * channel->granularity;
-		state->period = channel->state.period;
 		pwm_set_period(pwm, channel->state.period);
 
 		/* change pre scale*/
@@ -479,16 +478,12 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		if (ret < 0)
 			dev_err(chip->dev, "Failed to change PWM duty cycle\n");
 		channel->state.duty_cycle = tempduty * channel->granularity ;
-		state->duty_cycle = channel->state.duty_cycle;
 	}
 
 	/* check duty-cycle */
 	if(channel->state.duty_cycle != state->duty_cycle)
 	{
 		channel->granularity = DMEC_PWM_GRANULARITY(channel->preScaler, channel->scaler, channel->alignment);
-
-		if(state->duty_cycle > channel->state.period)
-			state->duty_cycle = channel->state.period;
 
 		tempduty = (uint16_t)CalcDuty(state->duty_cycle, channel->granularity);
 		ret = pwmWriteReg (currentBaseReg, PWMDTY, (uint8_t)(tempduty & 0xFF));
@@ -497,7 +492,6 @@ static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		if (ret < 0)
 			dev_err(chip->dev, "Failed to change PWM duty cycle\n");
 		channel->state.duty_cycle = tempduty * channel->granularity ;
-		state->duty_cycle = channel->state.duty_cycle;
 	}
 
 	/* check polarity */

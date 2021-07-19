@@ -43,7 +43,7 @@
 #define DMEC_FEATURE_BIT_GPIO		(3 << 6)
 
 #define DMEC_REG_MAX		0x88
-#define DMEC_MAX_DEVS		ARRAY_SIZE(dmec_devs)
+#define DMEC_MAX_DEVS		ARRAY_SIZE(dmec_dev_names)
 #define DMEC_MAX_IO_RES		2
 #define DMEC_STR_SZ		128
 
@@ -120,45 +120,14 @@ static struct resource dmec_gpio_irq_resources[DMEC_MAX_GPIO_CHIPS];
 static struct resource dmec_wdt_irq_resource;
 static struct resource dmec_i2c_irq_resource;
 
-static struct mfd_cell dmec_devs[] = {
-	[DMEC_I2C] = {
-		.name = "dmec-i2c",
-		.platform_data = &dmec_i2c_data,
-		.pdata_size = sizeof(dmec_i2c_data),
-		.resources = &dmec_i2c_irq_resource,
-		.num_resources = 1,
-		.id = 0,
-	},
-	[DMEC_GPIOA] = {
-		.name = "dmec-gpio",
-		.resources = &dmec_gpio_irq_resources[0],
-		.num_resources = 1,
-		.id = 0,
-	},
-	[DMEC_GPIOB] = {
-		.name = "dmec-gpio",
-		.resources = &dmec_gpio_irq_resources[1],
-		.num_resources = 1,
-		.id = 1,
-	},
-	[DMEC_WDT] = {
-		.name = "dmec-wdt",
-		.resources = &dmec_wdt_irq_resource,
-		.num_resources = 1,
-		.id = 0,
-	},
-	[DMEC_RTM] = {
-		.name = "dmec-rtm",
-		.id = 0,
-	},
-	[DMEC_ACPI] = {
-		.name = "dmec-acpi",
-		.id = 0,
-	},
-	[DMEC_PWM] = {
-		.name = "dmec-pwm",
-		.id = 0,
-	},
+static const char *dmec_dev_names[] = {
+	[DMEC_I2C]   = "dmec-i2c",
+	[DMEC_GPIOA] = "dmec-gpio",
+	[DMEC_GPIOB] = "dmec-gpio",
+	[DMEC_WDT]   = "dmec-wdt",
+	[DMEC_RTM]   = "dmec-rtm",
+	[DMEC_ACPI]  = "dmec-acpi",
+	[DMEC_PWM]   = "dmec-pwm",
 };
 
 static void dmec_get_gpio_irqs(struct dmec_device_data *ec)
@@ -239,33 +208,62 @@ static int dmec_pwm_detect(struct dmec_device_data *ec)
 
 static int dmec_register_cells(struct dmec_device_data *ec)
 {
-	struct mfd_cell cells[DMEC_MAX_DEVS];
+	struct mfd_cell cells[DMEC_MAX_DEVS] = {};
 	u8 n_dev = 0;
 
 	if (ec->u.feature_mask & DMEC_FEATURE_BIT_I2C) {
 		dmec_get_i2c_irq(ec);
-		cells[n_dev++] = dmec_devs[DMEC_I2C];
+		cells[n_dev].name = dmec_dev_names[DMEC_I2C];
+		cells[n_dev].platform_data = &dmec_i2c_data;
+		cells[n_dev].pdata_size = sizeof(dmec_i2c_data);
+		cells[n_dev].resources = &dmec_i2c_irq_resource;
+		cells[n_dev].num_resources = 1;
+		cells[n_dev].id = 0;
 	}
 
 	if (ec->u.feature_mask & DMEC_FEATURE_BIT_GPIO) {
+		n_dev++;
 		dmec_get_gpio_irqs(ec);
-		cells[n_dev++] = dmec_devs[DMEC_GPIOA];
-		if (ec->u.ftr.gpio_chips > 1)
-			cells[n_dev++] = dmec_devs[DMEC_GPIOB];
+		cells[n_dev].name = dmec_dev_names[DMEC_GPIOA];
+		if (dmec_gpio_irq_resources[0].start != 0) {
+			cells[n_dev].resources = &dmec_gpio_irq_resources[0];
+			cells[n_dev].num_resources = 1;
+		}		cells[n_dev].id = 0;
+		if (ec->u.ftr.gpio_chips > 1) {
+			n_dev++;
+			cells[n_dev].name = dmec_dev_names[DMEC_GPIOB];
+			if (dmec_gpio_irq_resources[1].start != 0) { 
+				cells[n_dev].resources = &dmec_gpio_irq_resources[1];
+				cells[n_dev].num_resources = 1;
+			}
+			cells[n_dev].id = 1;
+		}
 	}
 
 	if (ec->u.feature_mask & DMEC_FEATURE_BIT_WDT) {
+		n_dev++;
 		dmec_get_wdt_irq(ec);
-		cells[n_dev++] = dmec_devs[DMEC_WDT];
+		cells[n_dev].name = dmec_dev_names[DMEC_WDT];
+		cells[n_dev].resources = &dmec_wdt_irq_resource;
+		cells[n_dev].num_resources = 1;
+		cells[n_dev].id = 0;
 	}
 
-	if (dmec_rtm_detect(ec))
-		cells[n_dev++] = dmec_devs[DMEC_RTM];
+	if (dmec_rtm_detect(ec)) {
+		n_dev++;
+		cells[n_dev].name = dmec_dev_names[DMEC_RTM];
+		cells[n_dev].id = 0;
+	}
 
-	if (dmec_pwm_detect(ec))
-		cells[n_dev++] = dmec_devs[DMEC_PWM];
-
-	cells[n_dev++] = dmec_devs[DMEC_ACPI];
+	if (dmec_pwm_detect(ec)) {
+		n_dev++;
+		cells[n_dev].name = dmec_dev_names[DMEC_PWM];
+		cells[n_dev].id = 0;
+	}
+	
+	n_dev++;
+	cells[n_dev].name = dmec_dev_names[DMEC_ACPI];
+	cells[n_dev].id = 0;
 
 	return devm_mfd_add_devices(ec->dev, 0,
 				    cells, n_dev, NULL, 0, NULL);
