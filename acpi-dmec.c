@@ -21,8 +21,9 @@
 
 static struct regmap *regmap;
 
-#define SCOPE_LPCB "\\_SB.PCI0.LPCB.DMEC."
-#define SCOPE_SBRG "\\_SB.PCI0.SBRG.DMEC."
+#define SCOPE_LPCB  "\\_SB.PCI0.LPCB.DMEC."
+#define SCOPE_LPCB2 "\\_SB.PC00.LPCB.DMEC."
+#define SCOPE_SBRG  "\\_SB.PCI0.SBRG.DMEC."
 
 static unsigned long long dmec_acpi_get_data(char* input, int inparam)
 {
@@ -38,10 +39,14 @@ static unsigned long long dmec_acpi_get_data(char* input, int inparam)
 	status = acpi_get_handle(NULL, (acpi_string) path, &handle);
 	if(ACPI_FAILURE(status))
 	{
-		snprintf(path, sizeof(SCOPE_SBRG) + sizeof(input), SCOPE_SBRG"%s", input);
+		snprintf(path, sizeof(SCOPE_LPCB2) + sizeof(input), SCOPE_LPCB2"%s", input);
 		status = acpi_get_handle(NULL, (acpi_string) path, &handle);
-		if(ACPI_FAILURE(status))
-			return  0xFFFFFFFF;
+		if(ACPI_FAILURE(status)) {
+			snprintf(path, sizeof(SCOPE_SBRG) + sizeof(input), SCOPE_SBRG"%s", input);
+			status = acpi_get_handle(NULL, (acpi_string) path, &handle);
+			if(ACPI_FAILURE(status))
+				return  0xFFFFFFFF;
+		}
 	}
 
 	arg.type = ACPI_TYPE_INTEGER;
