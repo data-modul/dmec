@@ -88,7 +88,9 @@ The source of DMEC driver contains three branches for DMEC driver:
 
 1. backport-for-v4.4  =>  DMEC driver for kernel 4.4
 2. backport-for-v4.6  =>  DMEC driver for kernel 4.6
-3. master	      =>  DMEC driver for kernel 4.7 and above
+3. rya/backport-v4.14 =>  DMEC driver for kernel 4.14
+4. kernel_4.15        =>  DMEC driver for kernel 4.15
+5. master	            =>  DMEC driver for kernel 5.1x and above
 
 ### Compilation
 
