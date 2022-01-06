@@ -879,15 +879,9 @@ static int dmec_pwm_probe(struct platform_device *pdev)
 static int dmec_pwm_remove(struct platform_device *pdev)
 {
 	struct dmec_pwm_chip *dmecPwm = platform_get_drvdata(pdev);
-	int err;
-
-	err = pwmchip_remove(&dmecPwm->chip);
-	if(err < 0)
-	{
-		dev_err(&pdev->dev, "remove pwm driver failed: %d\n", err); 
-		return err;
-	}
+	pwmchip_remove(&dmecPwm->chip);
 	dev_dbg(&pdev->dev, "pwm driver removed.");
+
 	return 0;
 }
 
