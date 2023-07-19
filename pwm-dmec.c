@@ -269,7 +269,7 @@ static inline struct dmec_pwm_chip *to_dmec(struct pwm_chip *chip)
 	return container_of(chip, struct dmec_pwm_chip, chip);
 }
 
-static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
+static int dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 				struct pwm_state *state)
 {
 	dmec_pwm_channel *channel;
@@ -281,7 +281,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	if ((pwm->hwpwm == 1) && (channels[0].mode)) /* channel 1 in 16-bit mode is not active */
 	{
 		dev_info(chip->dev, "second PWM channel is not active in 16-bit mode\n");
-		return;
+		return 0;
 	}
 
 	if (pwm->hwpwm == 1) /* channel 1 */
@@ -306,7 +306,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM config\n", pwm->label);
-		return;
+		return 0;
 	}
 
 	/* mode : 1= 16bit, 0=8bit*/
@@ -332,7 +332,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM scaler\n", pwm->label);
-		return;
+		return 0;
 	}
 	channel->scaler = val;
 
@@ -341,7 +341,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM period\n", pwm->label);
-		return;
+		return 0;
 	}
 	channel->state.period = val;
 
@@ -350,7 +350,7 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret < 0)
 	{
 		dev_err(chip->dev, "%s: Failed to read PWM duty-cycle\n", pwm->label);
-		return;
+		return 0;
 	}
 	channel->state.duty_cycle = val;
 
@@ -367,6 +367,8 @@ static void dmec_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 	}
 
 	*state = channel->state;
+
+	return 0;
 }
 
 static int dmec_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm, 
